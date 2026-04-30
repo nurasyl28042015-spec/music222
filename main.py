@@ -9,11 +9,11 @@ from yt_dlp import YoutubeDL
 from shazamio import Shazam
 
 # --- КОНФИГУРАЦИЯ ---
-# Твой токен и путь для временных файлов
+# Твой токен (не меняй, если он рабочий)
 TOKEN = "8779251097:AAFLBBJhfp58iYJw8_8uKacKQmPKXOHKESQ"
 DOWNLOAD_PATH = "bot_downloads"
 
-# Настройка логирования для отслеживания ошибок
+# Настройка логов, чтобы видеть, что происходит внутри
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 bot = Bot(token=TOKEN)
@@ -21,28 +21,31 @@ dp = Dispatcher()
 shazam = Shazam()
 
 def clear_download_folder():
-    """Очищает папку загрузок при запуске бота."""
+    """Создает или очищает папку для временных файлов видео и аудио."""
     if os.path.exists(DOWNLOAD_PATH):
         shutil.rmtree(DOWNLOAD_PATH)
     os.makedirs(DOWNLOAD_PATH)
 
-# --- ПАРАМЕТРЫ ОБХОДА БЛОКИРОВОК ---
-# Эти настройки помогают YouTube "поверить", что запрос идет от реального пользователя
-YDL_COMMON_OPTS = {
+# --- СПЕЦИАЛЬНЫЕ НАСТРОЙКИ ДЛЯ ОБХОДА БЛОКИРОВОК ---
+# Эти параметры критически важны для работы на Render
+YDL_OPTIONS = {
     'quiet': True,
     'no_warnings': True,
     'nocheckcertificate': True,
-    # Использование клиента Android помогает обойти ошибку "Sign in to confirm you're not a bot"
+    # Имитируем запрос от мобильного приложения Android
     'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+    'http_headers': {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+    }
 }
 
 async def download_audio_by_title(title: str):
-    """Ищет и скачивает аудио по названию."""
+    """Ищет официальное аудио на YouTube и конвертирует в MP3."""
     unique_id = str(asyncio.get_event_loop().time()).replace('.', '')
     path_template = f"{DOWNLOAD_PATH}/audio_{unique_id}.%(ext)s"
     
     ydl_opts = {
-        **YDL_COMMON_OPTS,
+        **YDL_OPTIONS,
         'outtmpl': path_template,
         'format': 'bestaudio/best',
         'postprocessors': [{
@@ -60,47 +63,12 @@ async def download_audio_by_title(title: str):
         path = ydl.prepare_filename(info).rsplit('.', 1)[0] + ".mp3"
         return path, info.get('title', 'Unknown')
 
-async def search_tracks(query: str, limit=5):
-    """Ищет варианты песен для вывода в кнопках."""
-    ydl_opts = {
-        **YDL_COMMON_OPTS,
-        'noplaylist': True,
-        'default_search': f'ytsearch{limit}',
-    }
-    with YoutubeDL(ydl_opts) as ydl:
-        loop = asyncio.get_event_loop()
-        info = await loop.run_in_executor(None, lambda: ydl.extract_info(f"ytsearch{limit}:{query} official audio", download=False))
-        if not info or 'entries' not in info:
-            return []
-        return [{'id': e['id'], 'title': e['title']} for e in info['entries']]
-
-async def download_by_id(video_id: str):
-    """Скачивает аудио по конкретному ID YouTube."""
-    unique_id = str(asyncio.get_event_loop().time()).replace('.', '')
-    path_template = f"{DOWNLOAD_PATH}/audio_{unique_id}.%(ext)s"
-    ydl_opts = {
-        **YDL_COMMON_OPTS,
-        'outtmpl': path_template,
-        'format': 'bestaudio/best',
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
-    }
-    url = f"https://www.youtube.com/watch?v={video_id}"
-    with YoutubeDL(ydl_opts) as ydl:
-        loop = asyncio.get_event_loop()
-        info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
-        path = ydl.prepare_filename(info).rsplit('.', 1)[0] + ".mp3"
-        return path, info.get('title', 'Unknown')
-
 async def download_video_link(url: str):
-    """Скачивает видео файл из ссылки."""
+    """Скачивает само видео (TikTok/Reels/Shorts)."""
     unique_id = str(asyncio.get_event_loop().time()).replace('.', '')
     filename = f"{DOWNLOAD_PATH}/video_{unique_id}.%(ext)s"
     ydl_opts = {
-        **YDL_COMMON_OPTS,
+        **YDL_OPTIONS,
         'outtmpl': filename,
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
     }
@@ -109,85 +77,73 @@ async def download_video_link(url: str):
         info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
         return ydl.prepare_filename(info)
 
-# --- ОБРАБОТЧИКИ СООБЩЕНИЙ ---
-
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("👋 Привет! Я помогу тебе скачать музыку.\n\n"
-                         "🔗 Пришли мне ссылку на TikTok/Reels или просто напиши название песни!")
+    await message.answer("👋 Привет! Я готов скачивать музыку и видео.\n\n"
+                         "Пришли мне ссылку на TikTok/Reels или просто название песни!")
 
 @dp.message(lambda msg: msg.text and any(x in msg.text.lower() for x in ['tiktok.com', 'instagram.com', 'youtube.com/shorts', 'youtu.be']))
 async def handle_link(message: types.Message):
-    status = await message.answer("⏳ Обработка... Загружаю видео.")
+    status = await message.answer("⏳ Начинаю загрузку...")
     files_to_delete = []
     try:
-        # 1. Загрузка видео
+        # 1. Скачиваем видео
         video_path = await download_video_link(message.text)
         files_to_delete.append(video_path)
         
-        # 2. Распознавание музыки
+        # 2. Распознаем через Shazam (ИСПРАВЛЕНО: используем .recognize)
         await status.edit_text("🔍 Распознаю музыку...")
-        # Обновленный метод .recognize()
         out = await shazam.recognize(video_path)
         
         if out and out.get('track'):
             track_title = f"{out['track']['subtitle']} - {out['track']['title']}"
-            await status.edit_text(f"✅ Найдено: {track_title}\n📥 Ищу полную версию MP3...")
+            await status.edit_text(f"✅ Найдено: {track_title}\n📥 Ищу MP3 версию...")
             
-            # 3. Загрузка MP3
-            audio_path, final_audio_title = await download_audio_by_title(track_title)
+            # 3. Скачиваем MP3
+            audio_path, final_title = await download_audio_by_title(track_title)
             files_to_delete.append(audio_path)
             
-            # 4. Отправка файлов пользователю
+            # 4. Отправляем пользователю
             await message.answer_video(types.FSInputFile(video_path), caption="🎬 Видео")
-            await message.answer_audio(types.FSInputFile(audio_path), title=final_audio_title, caption="🎵 Полная версия")
+            await message.answer_audio(types.FSInputFile(audio_path), title=final_title)
         else:
-            await status.edit_text("🤷 Музыка не распознана, отправляю только видео.")
+            await status.edit_text("🤷 Музыка не определена, отправляю видео.")
             await message.answer_video(types.FSInputFile(video_path))
 
     except Exception as e:
-        logging.error(f"Ошибка: {e}")
-        await message.answer("❌ Не удалось обработать ссылку. Возможно, видео защищено или YouTube блокирует запрос.")
+        logging.error(f"Ошибка загрузки: {e}")
+        await message.answer("❌ Ошибка: YouTube заблокировал доступ или ссылка неверна.")
     finally:
         await asyncio.sleep(2)
         try: await status.delete()
         except: pass
-        # Удаляем временные файлы, чтобы не занимать место на диске
+        # Удаляем файлы, чтобы не занимать место на сервере Render
         for f in files_to_delete:
             if os.path.exists(f): os.remove(f)
 
+# Поиск по текстовому названию
 @dp.message(F.text)
 async def handle_search(message: types.Message):
-    """Обработчик текстовых запросов (поиск по названию)."""
     query = message.text
-    status = await message.answer(f"🔎 Ищу: {query}...")
+    status = await message.answer(f"🔎 Ищу варианты для: {query}...")
     try:
-        results = await search_tracks(query)
-        if not results:
-            await status.edit_text("Ничего не найдено.")
-            return
-
-        builder = InlineKeyboardBuilder()
-        for res in results:
-            short_title = (res['title'][:40] + '..') if len(res['title']) > 40 else res['title']
-            builder.row(types.InlineKeyboardButton(text=f"🎵 {short_title}", callback_data=f"dl_{res['id']}"))
-
-        await status.edit_text(f"Результаты по запросу '{query}':", reply_markup=builder.as_markup())
-    except:
-        await status.edit_text("Ошибка при поиске.")
-
-@dp.callback_query(F.data.startswith("dl_"))
-async def process_download(callback: types.CallbackQuery):
-    """Обработка нажатия на кнопку скачивания трека из результатов поиска."""
-    video_id = callback.data.split("_")[1]
-    await callback.message.edit_text("📥 Скачиваю выбранный трек...")
-    try:
-        path, title = await download_by_id(video_id)
-        await callback.message.answer_audio(types.FSInputFile(path), title=title)
-        if os.path.exists(path): os.remove(path)
-        await callback.message.delete()
-    except:
-        await callback.message.answer("Не удалось скачать.")
+        ydl_opts = {**YDL_OPTIONS, 'noplaylist': True, 'default_search': 'ytsearch5'}
+        with YoutubeDL(ydl_opts) as ydl:
+            loop = asyncio.get_event_loop()
+            info = await loop.run_in_executor(None, lambda: ydl.extract_info(query, download=False))
+            if not info or 'entries' not in info:
+                await status.edit_text("Ничего не найдено.")
+                return
+            
+            builder = InlineKeyboardBuilder()
+            for res in info['entries']:
+                short_title = (res['title'][:40] + '..') if len(res['title']) > 40 else res['title']
+                builder.row(types.InlineKeyboardButton(text=f"🎵 {short_title}", callback_data=f"dl_{res['id']}"))
+            
+            await status.edit_text("Выбери нужный трек:", reply_markup=builder.as_markup())
+    except Exception as e:
+        logging.error(e)
+        await status.edit_text("⚠️ Ошибка поиска.")
 
 async def main():
     clear_download_folder()
@@ -198,5 +154,5 @@ async def main():
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
+    except:
         pass
